@@ -1,0 +1,10 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "extraPaths": [
+    ".",
+    "01-llm-api-call",
+    "02-chat-history",
+    "03-tool-calling"
+  ]
+}
