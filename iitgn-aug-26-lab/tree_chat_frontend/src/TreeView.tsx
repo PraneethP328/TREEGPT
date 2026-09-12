@@ -21,26 +21,25 @@ const ROW_H = 130;   // vertical gap between sibling nodes
 // ─── Types passed to each custom RF node ──────────────────────────────────
 type NodeData = {
   treeNode: TreeNode;
-  isOnActivePath: boolean;   // node is in the currently loaded chat path
+  isOnActivePath: boolean;
   onNodeClick: (n: TreeNode) => void;
+  onChatFromNode: (nodeId: string) => void;
   onSetMainChild: (parentId: string, childId: string) => void;
-  isMainChild: boolean;      // this node is parent's main_child_id
-  siblings: TreeNode[];      // other children of the same parent
+  isMainChild: boolean;
 };
 
 // ─── Custom RF node renderer ───────────────────────────────────────────────
 function ChatNode({ data }: NodeProps<NodeData>) {
-  const { treeNode, isOnActivePath, onNodeClick, onSetMainChild, isMainChild } = data;
+  const { treeNode, isOnActivePath, onNodeClick, onChatFromNode, onSetMainChild, isMainChild } = data;
 
-  // A node is visually a "leaf" when it has no main_child_id
-  // (i.e. nothing points forward from it in the main path)
+  // visually a leaf = no main_child_id
   const hasNoChildren = treeNode.main_child_id === null;
 
   const shortPrompt = treeNode.prompt.length > 55
     ? treeNode.prompt.slice(0, 55) + "…"
     : treeNode.prompt;
-  const shortResp = treeNode.response.length > 70
-    ? treeNode.response.slice(0, 70) + "…"
+  const shortResp = treeNode.response.length > 60
+    ? treeNode.response.slice(0, 60) + "…"
     : treeNode.response;
   const modelShort = treeNode.model_used.split("/").pop() ?? treeNode.model_used;
 
@@ -51,30 +50,46 @@ function ChatNode({ data }: NodeProps<NodeData>) {
         isOnActivePath ? "rf-node--active" : "",
         hasNoChildren ? "rf-node--leaf" : "",
       ].join(" ")}
-      onClick={() => onNodeClick(treeNode)}
     >
       <Handle type="target" position={Position.Left} style={{ opacity: 0 }} />
 
-      <div className="rf-node-prompt">{shortPrompt}</div>
-      <div className="rf-node-response">{shortResp}</div>
+      {/* Top area: prompt + response preview — clicking reads this branch */}
+      <div className="rf-node-body" onClick={() => onNodeClick(treeNode)} title="View this branch">
+        <div className="rf-node-prompt">{shortPrompt}</div>
+        <div className="rf-node-response">{shortResp}</div>
+      </div>
 
       <div className="rf-node-footer">
         <span className="rf-model-badge">{modelShort}</span>
         {isMainChild && <span className="rf-main-badge">★ main</span>}
-        {/* Show "set as main" for non-main siblings that have a parent */}
-        {!isMainChild && treeNode.parent_id !== null && (
+        {hasNoChildren && <span className="rf-leaf-badge">leaf</span>}
+
+        <div className="rf-node-actions">
+          {/* Chat from here — loads path to exactly this node, closes tree */}
           <button
-            className="rf-set-main-btn"
-            title="Set as main child"
+            className="rf-chat-btn"
+            title="Continue chatting from this node"
             onClick={(e) => {
               e.stopPropagation();
-              onSetMainChild(treeNode.parent_id!, treeNode.id);
+              onChatFromNode(treeNode.id);
             }}
           >
-            ☆ set main
+            ▶ Chat here
           </button>
-        )}
-        {hasNoChildren && <span className="rf-leaf-badge">leaf</span>}
+
+          {!isMainChild && treeNode.parent_id !== null && (
+            <button
+              className="rf-set-main-btn"
+              title="Set as main child"
+              onClick={(e) => {
+                e.stopPropagation();
+                onSetMainChild(treeNode.parent_id!, treeNode.id);
+              }}
+            >
+              ☆ set main
+            </button>
+          )}
+        </div>
       </div>
 
       <Handle type="source" position={Position.Right} style={{ opacity: 0 }} />
@@ -89,6 +104,7 @@ function buildLayout(
   treeNodes: TreeNode[],
   activePathIds: Set<string>,
   onNodeClick: (n: TreeNode) => void,
+  onChatFromNode: (nodeId: string) => void,
   onSetMainChild: (parentId: string, childId: string) => void,
 ): { nodes: Node<NodeData>[]; edges: Edge[] } {
   const byId = new Map(treeNodes.map((n) => [n.id, n]));
@@ -100,10 +116,8 @@ function buildLayout(
     childrenOf.get(key)!.push(n);
   }
 
-  // BFS: assign depth (x) and sibling index (y)
   const posMap = new Map<string, { x: number; y: number }>();
 
-  // subtreeHeight: total number of leaf slots under a node
   function subtreeHeight(nodeId: string): number {
     const kids = childrenOf.get(nodeId) ?? [];
     if (kids.length === 0) return 1;
@@ -113,27 +127,21 @@ function buildLayout(
   function assign(nodeId: string, depth: number, startY: number): void {
     const kids = childrenOf.get(nodeId) ?? [];
     const h = subtreeHeight(nodeId);
-    // center this node in its allocated vertical span
-    posMap.set(nodeId, { x: depth * COL_W, y: (startY + startY + h - 1) / 2 * ROW_H });
-
+    posMap.set(nodeId, { x: depth * COL_W, y: ((startY * 2 + h - 1) / 2) * ROW_H });
     let cursor = startY;
     for (const kid of kids) {
-      const kh = subtreeHeight(kid.id);
       assign(kid.id, depth + 1, cursor);
-      cursor += kh;
+      cursor += subtreeHeight(kid.id);
     }
   }
 
   const root = treeNodes.find((n) => n.parent_id === null);
-  if (root) {
-    assign(root.id, 0, 0);
-  }
+  if (root) assign(root.id, 0, 0);
 
   const rfNodes: Node<NodeData>[] = treeNodes.map((n) => {
     const pos = posMap.get(n.id) ?? { x: 0, y: 0 };
     const parent = n.parent_id ? byId.get(n.parent_id) : null;
     const isMainChild = parent?.main_child_id === n.id;
-    const siblings = childrenOf.get(n.parent_id ?? null) ?? [];
 
     return {
       id: n.id,
@@ -143,9 +151,9 @@ function buildLayout(
         treeNode: n,
         isOnActivePath: activePathIds.has(n.id),
         onNodeClick,
+        onChatFromNode,
         onSetMainChild,
         isMainChild,
-        siblings,
       },
     };
   });
@@ -172,8 +180,9 @@ function buildLayout(
 // ─── Main TreeView component ───────────────────────────────────────────────
 type TreeViewProps = {
   treeNodes: TreeNode[];
-  activePathIds: Set<string>;         // IDs of nodes currently shown in chat
-  onSelectLeaf: (nodeId: string) => void;   // called with the effective leaf to navigate to
+  activePathIds: Set<string>;
+  onSelectLeaf: (nodeId: string) => void;   // click body → resolve leaf → load path
+  onChatFromNode: (nodeId: string) => void; // "Chat here" → load path to exactly this node
   onSetMainChild: (parentId: string, childId: string) => void;
   onClose: () => void;
 };
@@ -182,11 +191,11 @@ function InnerFlow({
   treeNodes,
   activePathIds,
   onSelectLeaf,
+  onChatFromNode,
   onSetMainChild,
 }: Omit<TreeViewProps, "onClose">) {
   const { fitView } = useReactFlow();
 
-  // Follow main_child_id chain from a node to find the effective leaf
   const findEffectiveLeaf = useCallback(
     (startNode: TreeNode): TreeNode => {
       const byId = new Map(treeNodes.map((n) => [n.id, n]));
@@ -209,10 +218,12 @@ function InnerFlow({
     [findEffectiveLeaf, onSelectLeaf],
   );
 
+
   const { nodes, edges } = useMemo(
-    () => buildLayout(treeNodes, activePathIds, handleNodeClick, onSetMainChild),
-    [treeNodes, activePathIds, handleNodeClick, onSetMainChild],
+    () => buildLayout(treeNodes, activePathIds, handleNodeClick, onChatFromNode, onSetMainChild),
+    [treeNodes, activePathIds, handleNodeClick, onChatFromNode, onSetMainChild],
   );
+
 
   // Re-fit whenever the tree nodes change
   useEffect(() => {
@@ -254,7 +265,7 @@ export default function TreeView(props: TreeViewProps) {
       <div className="tree-drawer-header">
         <span className="tree-drawer-title">🌲 Conversation Tree</span>
         <div className="tree-drawer-hint">
-          Click any node to navigate · Blue edges = main path · ★ marks main child
+          Click node body → view branch · ▶ Chat here → continue from that point · ☆ set main → change main path
         </div>
         <button className="tree-close-btn" onClick={props.onClose}>✕ Close</button>
       </div>
@@ -264,6 +275,7 @@ export default function TreeView(props: TreeViewProps) {
             treeNodes={props.treeNodes}
             activePathIds={props.activePathIds}
             onSelectLeaf={props.onSelectLeaf}
+            onChatFromNode={props.onChatFromNode}
             onSetMainChild={props.onSetMainChild}
           />
         </ReactFlowProvider>

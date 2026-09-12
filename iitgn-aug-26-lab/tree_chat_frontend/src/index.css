@@ -29,6 +29,8 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  height: 100vh;
+  overflow: hidden;   /* sidebar itself doesn't scroll — only .conversation-list does */
 }
 
 .sidebar-header button,
@@ -46,7 +48,9 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  overflow: auto;
+  overflow-y: auto;    /* only this pane scrolls */
+  flex: 1;
+  min-height: 0;       /* required for flex children to scroll */
 }
 
 .conversation {
@@ -58,16 +62,20 @@ html, body {
   border-radius: 8px;
   padding: 10px;
   cursor: pointer;
+  flex-shrink: 0;
 }
 
 .conversation.active {
   border-color: #2563eb;
 }
 
+/* chat-shell: 4 rows — header / messages(scrollable) / error / composer */
 .chat-shell {
   display: grid;
   grid-template-rows: auto 1fr auto auto;
+  height: 100vh;
   min-width: 0;
+  overflow: hidden;   /* children handle their own scroll */
 }
 
 .chat-header {
@@ -117,7 +125,8 @@ html, body {
 }
 
 .messages {
-  overflow: auto;
+  overflow-y: auto;
+  min-height: 0;       /* CRITICAL: grid children need this to actually scroll */
   padding: 20px;
   display: flex;
   flex-direction: column;
@@ -380,20 +389,17 @@ html, body {
   cursor: not-allowed;
 }
 
-/* ── Tree drawer ─────────────────────────────────────────────────────────── */
+/* ── Tree drawer — full-screen modal over everything ────────────────────── */
 .tree-drawer {
-  position: absolute;
-  top: 0;
-  right: 0;
-  width: 680px;
-  max-width: 90vw;
+  position: fixed;
+  inset: 0;                   /* covers entire viewport */
+  width: 100vw;
   height: 100vh;
-  background: #0b1120;
-  border-left: 1px solid #1e3a5f;
+  background: #080f1e;
   display: flex;
   flex-direction: column;
-  z-index: 100;
-  box-shadow: -8px 0 32px rgba(0,0,0,0.6);
+  z-index: 9999;
+  overflow: hidden;
 }
 
 .tree-drawer-header {
@@ -444,14 +450,12 @@ html, body {
   border: 1px solid #374151;
   border-radius: 10px;
   padding: 10px 13px;
-  width: 260px;
-  cursor: pointer;
+  width: 280px;
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 
 .rf-node:hover {
-  border-color: #60a5fa;
-  box-shadow: 0 0 0 2px rgba(59,130,246,0.25);
+  border-color: #475569;
 }
 
 .rf-node--active {
@@ -463,35 +467,48 @@ html, body {
   border-style: dashed;
 }
 
+/* The clickable body of the node — shows this branch in chat */
+.rf-node-body {
+  cursor: pointer;
+  margin-bottom: 8px;
+}
+
+.rf-node-body:hover .rf-node-prompt {
+  color: #93c5fd;
+}
+
 .rf-node-prompt {
   font-size: 12px;
   color: #e5e7eb;
   font-weight: 500;
-  margin-bottom: 4px;
+  margin-bottom: 3px;
   line-height: 1.4;
+  transition: color 0.1s;
 }
 
 .rf-node-response {
   font-size: 11px;
-  color: #6b7280;
+  color: #4b5563;
   line-height: 1.4;
-  margin-bottom: 6px;
 }
 
 .rf-node-footer {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   flex-wrap: wrap;
+  border-top: 1px solid #1e293b;
+  padding-top: 7px;
+  margin-top: 2px;
 }
 
 .rf-model-badge {
   font-size: 10px;
   color: #475569;
-  background: #1e293b;
+  background: #0f172a;
   border-radius: 4px;
   padding: 2px 5px;
-  max-width: 120px;
+  max-width: 110px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -500,7 +517,7 @@ html, body {
 .rf-main-badge {
   font-size: 10px;
   color: #fbbf24;
-  background: #292109;
+  background: #1c1405;
   border: 1px solid #78350f;
   border-radius: 4px;
   padding: 2px 5px;
@@ -509,10 +526,34 @@ html, body {
 .rf-leaf-badge {
   font-size: 10px;
   color: #34d399;
-  background: #052e16;
+  background: #021c0e;
   border: 1px solid #065f46;
   border-radius: 4px;
   padding: 2px 5px;
+}
+
+/* Action buttons row inside each node */
+.rf-node-actions {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.rf-chat-btn {
+  font-size: 10px;
+  color: #60a5fa;
+  background: #0f1f3a;
+  border: 1px solid #1d4ed8;
+  border-radius: 4px;
+  padding: 2px 7px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s;
+}
+
+.rf-chat-btn:hover {
+  background: #1e3a5f;
 }
 
 .rf-set-main-btn {
@@ -531,7 +572,7 @@ html, body {
   border-color: #92400e;
 }
 
-/* Prevent ReactFlow's default blue selection outlines on our node wrappers */
+/* Prevent ReactFlow's default blue selection outlines */
 .react-flow__node:focus {
   outline: none;
 }

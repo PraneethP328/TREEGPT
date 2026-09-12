@@ -164,6 +164,27 @@ function App() {
     [apiKey, conversationId],
   );
 
+  /**
+   * "Chat from here" — navigates to exactly nodeId (not the main-child leaf).
+   * The chat view shows root→nodeId. The composer will then create a child of nodeId.
+   * This is how the user continues a branch from a mid-tree node.
+   */
+  const handleChatFromNode = useCallback(
+    async (nodeId: string): Promise<void> => {
+      if (!apiKey || !conversationId) return;
+      try {
+        const path = await getPath(apiKey, conversationId, nodeId);
+        setPathNodes(path);
+        setBranchState(null);
+        setShowTree(false);
+        setError(null);
+      } catch (err) {
+        setError(getErrorMessage(err));
+      }
+    },
+    [apiKey, conversationId],
+  );
+
   async function handleSend(event: FormEvent): Promise<void> {
     event.preventDefault();
     if (!apiKey) {
@@ -324,7 +345,7 @@ function App() {
   }
 
   return (
-    <div className="layout-outer">
+    <>
       <div className="layout">
         <aside className="sidebar">
           <div className="sidebar-header">
@@ -366,100 +387,101 @@ function App() {
             </div>
           </header>
 
-        <section className="messages">
-          {messages.length === 0 ? (
-            <div className="empty-state">Ask anything to begin.</div>
-          ) : (
-            messages.map((message, index) => {
-              const showBranchFormHere =
-                message.role === "assistant" &&
-                branchState?.nodeId === message.nodeId;
+          <section className="messages">
+            {messages.length === 0 ? (
+              <div className="empty-state">Ask anything to begin.</div>
+            ) : (
+              messages.map((message, index) => {
+                const showBranchFormHere =
+                  message.role === "assistant" &&
+                  branchState?.nodeId === message.nodeId;
 
-              return (
-                <div key={`${message.nodeId}-${message.role}-${index}`}>
-                  <div className={`bubble ${message.role}`}>
-                    <div className="role">{message.role === "user" ? "You" : "Assistant"}</div>
-                    <div>{message.content}</div>
-                    {message.role === "assistant" && message.model ? (
-                      <div className="model-tag">{message.model}</div>
-                    ) : null}
-                    {/* Branch button — only on assistant bubbles, only when a conversation is open */}
-                    {message.role === "assistant" && conversationId && !isLoading ? (
-                      <div className="bubble-actions">
-                        {!showBranchFormHere ? (
-                          <button
-                            className="branch-btn"
-                            title="Branch from this point"
-                            onClick={() => openBranchForm(message.nodeId)}
-                          >
-                            ⎇ Branch
-                          </button>
-                        ) : (
-                          <button
-                            className="branch-btn cancel"
-                            onClick={() => setBranchState(null)}
-                          >
-                            ✕ Cancel
-                          </button>
-                        )}
-                      </div>
-                    ) : null}
+                return (
+                  <div key={`${message.nodeId}-${message.role}-${index}`}>
+                    <div className={`bubble ${message.role}`}>
+                      <div className="role">{message.role === "user" ? "You" : "Assistant"}</div>
+                      <div>{message.content}</div>
+                      {message.role === "assistant" && message.model ? (
+                        <div className="model-tag">{message.model}</div>
+                      ) : null}
+                      {/* Branch button — only on assistant bubbles, only when a conversation is open */}
+                      {message.role === "assistant" && conversationId && !isLoading ? (
+                        <div className="bubble-actions">
+                          {!showBranchFormHere ? (
+                            <button
+                              className="branch-btn"
+                              title="Branch from this point"
+                              onClick={() => openBranchForm(message.nodeId)}
+                            >
+                              ⎇ Branch
+                            </button>
+                          ) : (
+                            <button
+                              className="branch-btn cancel"
+                              onClick={() => setBranchState(null)}
+                            >
+                              ✕ Cancel
+                            </button>
+                          )}
+                        </div>
+                      ) : null}
+                    </div>
+
+                    {/* Inline branch form anchored to this bubble */}
+                    {showBranchFormHere && (
+                      <BranchForm
+                        state={branchState!}
+                        models={MODELS}
+                        isLoading={isLoading}
+                        onChange={(patch) => setBranchState((prev) => prev ? { ...prev, ...patch } : prev)}
+                        onSubmit={(e) => void handleBranchSubmit(e)}
+                        onCancel={() => setBranchState(null)}
+                      />
+                    )}
                   </div>
+                );
+              })
+            )}
 
-                  {/* Inline branch form anchored to this bubble */}
-                  {showBranchFormHere && (
-                    <BranchForm
-                      state={branchState!}
-                      models={MODELS}
-                      isLoading={isLoading}
-                      onChange={(patch) => setBranchState((prev) => prev ? { ...prev, ...patch } : prev)}
-                      onSubmit={(e) => void handleBranchSubmit(e)}
-                      onCancel={() => setBranchState(null)}
-                    />
-                  )}
-                </div>
-              );
-            })
-          )}
+            {streamingText ? (
+              <div className="bubble assistant">
+                <div className="role">Assistant</div>
+                <div>{streamingText}</div>
+                <div className="typing">Streaming…</div>
+              </div>
+            ) : null}
 
-          {streamingText ? (
-            <div className="bubble assistant">
-              <div className="role">Assistant</div>
-              <div>{streamingText}</div>
-              <div className="typing">Streaming…</div>
-            </div>
-          ) : null}
+            <div ref={messagesEndRef} />
+          </section>
 
-          <div ref={messagesEndRef} />
-        </section>
+          {error ? <div className="error-banner">{error}</div> : null}
 
-        {error ? <div className="error-banner">{error}</div> : null}
-
-        <form className="composer" onSubmit={(e) => void handleSend(e)}>
-          <input
-            placeholder={branchState ? "Close the branch form above to continue here…" : "Send a message…"}
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            disabled={isLoading || !!branchState}
-          />
-          <button type="submit" disabled={isLoading || prompt.trim().length === 0 || !!branchState}>
-            {isLoading ? "Sending…" : "Send"}
-          </button>
-        </form>
+          <form className="composer" onSubmit={(e) => void handleSend(e)}>
+            <input
+              placeholder={branchState ? "Close the branch form above to continue here…" : "Send a message…"}
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              disabled={isLoading || !!branchState}
+            />
+            <button type="submit" disabled={isLoading || prompt.trim().length === 0 || !!branchState}>
+              {isLoading ? "Sending…" : "Send"}
+            </button>
+          </form>
         </main>
       </div>
 
-      {/* Tree drawer — overlaid on the right side */}
+      {/* Tree — position:fixed, full-screen, renders above everything */}
       {showTree && conversationId && (
         <TreeView
           treeNodes={allTreeNodes}
           activePathIds={activePathIds}
           onSelectLeaf={(id) => void handleSelectLeaf(id)}
+          onChatFromNode={(id) => void handleChatFromNode(id)}
           onSetMainChild={(parentId, childId) => void handleSetMainChild(parentId, childId)}
           onClose={() => setShowTree(false)}
         />
       )}
-    </div>
+    </>
   );
 }
 
