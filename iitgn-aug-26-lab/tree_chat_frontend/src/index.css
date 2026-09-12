@@ -451,7 +451,8 @@ html, body {
   border-radius: 10px;
   padding: 10px 13px;
   width: 280px;
-  transition: border-color 0.15s, box-shadow 0.15s;
+  font-family: inherit;
+  transition: border-color 0.15s;
 }
 
 .rf-node:hover {
@@ -467,14 +468,9 @@ html, body {
   border-style: dashed;
 }
 
-/* The clickable body of the node — shows this branch in chat */
-.rf-node-body {
-  cursor: pointer;
-  margin-bottom: 8px;
-}
-
-.rf-node-body:hover .rf-node-prompt {
-  color: #93c5fd;
+/* Preview area (prompt + response text) */
+.rf-node-preview {
+  margin-bottom: 6px;
 }
 
 .rf-node-prompt {
@@ -482,24 +478,22 @@ html, body {
   color: #e5e7eb;
   font-weight: 500;
   margin-bottom: 3px;
-  line-height: 1.4;
-  transition: color 0.1s;
+  line-height: 1.35;
 }
 
 .rf-node-response {
   font-size: 11px;
   color: #4b5563;
-  line-height: 1.4;
+  line-height: 1.35;
 }
 
-.rf-node-footer {
+/* Badges row */
+.rf-node-badges {
   display: flex;
   align-items: center;
   gap: 5px;
   flex-wrap: wrap;
-  border-top: 1px solid #1e293b;
-  padding-top: 7px;
-  margin-top: 2px;
+  margin-bottom: 7px;
 }
 
 .rf-model-badge {
@@ -532,47 +526,63 @@ html, body {
   padding: 2px 5px;
 }
 
-/* Action buttons row inside each node */
+/* ── Action buttons row ──────────────────────────────────────────────────── */
 .rf-node-actions {
   display: flex;
   gap: 4px;
-  margin-left: auto;
-  flex-shrink: 0;
+  flex-wrap: wrap;
+  border-top: 1px solid #1e293b;
+  padding-top: 7px;
 }
 
-.rf-chat-btn {
+.rf-btn {
   font-size: 10px;
-  color: #60a5fa;
-  background: #0f1f3a;
-  border: 1px solid #1d4ed8;
   border-radius: 4px;
-  padding: 2px 7px;
+  padding: 3px 8px;
   cursor: pointer;
   white-space: nowrap;
-  transition: background 0.12s;
+  border: 1px solid;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+  font-family: inherit;
 }
 
-.rf-chat-btn:hover {
+/* "Show branch" — blue */
+.rf-btn--show {
+  color: #93c5fd;
+  background: #0c1a30;
+  border-color: #1e3a5f;
+}
+.rf-btn--show:hover {
   background: #1e3a5f;
+  color: #bfdbfe;
 }
 
-.rf-set-main-btn {
-  font-size: 10px;
-  color: #9ca3af;
-  background: transparent;
-  border: 1px solid #374151;
-  border-radius: 4px;
-  padding: 2px 6px;
-  cursor: pointer;
-  transition: color 0.15s, border-color 0.15s;
+/* "Chat here" — green */
+.rf-btn--chat {
+  color: #6ee7b7;
+  background: #052e16;
+  border-color: #065f46;
+}
+.rf-btn--chat:hover {
+  background: #064e3b;
+  color: #a7f3d0;
 }
 
-.rf-set-main-btn:hover {
+/* "Set main" — amber */
+.rf-btn--main {
   color: #fbbf24;
-  border-color: #92400e;
+  background: transparent;
+  border-color: #78350f;
+}
+.rf-btn--main:hover {
+  background: #292109;
+  color: #fde68a;
+  border-color: #d97706;
 }
 
-/* Prevent ReactFlow's default blue selection outlines */
-.react-flow__node:focus {
+/* Suppress ReactFlow's default selection/focus outlines */
+.react-flow__node:focus,
+.react-flow__node.selected {
   outline: none;
+  box-shadow: none;
 }

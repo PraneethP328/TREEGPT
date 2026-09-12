@@ -236,14 +236,17 @@ function App() {
       if (!doneNode) {
         throw new Error("The model stream ended without a final node.");
       }
-      setPathNodes((prev) => [...prev, doneNode as TreeNode]);
       setStreamingText("");
+
+      // Reload the full path from DB so every node has fresh main_child_id.
+      // The `done` event gives us the new node but the parent's main_child_id
+      // is updated on the server AFTER that — so we must re-fetch.
+      const freshPath = await getPath(apiKey, conversationId!, (doneNode as TreeNode).id);
+      setPathNodes(freshPath);
+
       await refreshConversations(apiKey);
-      // Keep allTreeNodes in sync so tree panel is up-to-date when opened
-      if (conversationId) {
-        const updatedTree = await getTree(apiKey, conversationId);
-        setAllTreeNodes(updatedTree);
-      }
+      const updatedTree = await getTree(apiKey, conversationId!);
+      setAllTreeNodes(updatedTree);
 
     } catch (err) {
       setStreamingText("");
@@ -475,7 +478,7 @@ function App() {
         <TreeView
           treeNodes={allTreeNodes}
           activePathIds={activePathIds}
-          onSelectLeaf={(id) => void handleSelectLeaf(id)}
+          onShowBranch={(id) => void handleSelectLeaf(id)}
           onChatFromNode={(id) => void handleChatFromNode(id)}
           onSetMainChild={(parentId, childId) => void handleSetMainChild(parentId, childId)}
           onClose={() => setShowTree(false)}
