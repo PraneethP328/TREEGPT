@@ -4,15 +4,21 @@ import json
 import uuid
 from collections.abc import Iterator
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from openai import OpenAIError
-from sqlmodel import select
+from sqlmodel import Session, select
 
+from tree_chat_backend.auth import (
+    create_access_token,
+    get_current_user,
+    hash_password,
+    verify_password,
+)
 from tree_chat_backend.context import build_context, context_to_messages
-from tree_chat_backend.db import get_session, init_db
-from tree_chat_backend.models import Conversation, Node
+from tree_chat_backend.db import get_db_session, get_session, init_db
+from tree_chat_backend.models import Conversation, Node, User
 from tree_chat_backend.openrouter import get_openrouter_client
 from tree_chat_backend.schemas import (
     ConversationSummary,
@@ -20,9 +26,12 @@ from tree_chat_backend.schemas import (
     CreateConversationResponse,
     CreateNodeRequest,
     SetMainChildRequest,
+    TokenResponse,
     TreeNodeResponse,
+    UserLoginRequest,
+    UserRegisterRequest,
+    UserResponse,
 )
-
 
 SYSTEM_PROMPT = "You are a helpful assistant."
 MAX_CHILDREN_PER_NODE = 10
@@ -31,6 +40,7 @@ app = FastAPI(title="Tree Chat Backend")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -55,9 +65,100 @@ def _to_tree_node_response(node: Node) -> TreeNodeResponse:
     )
 
 
+# ---------------------------------------------------------------------------
+# Auth Endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.post("/auth/register", response_model=TokenResponse)
+def register(
+    payload: UserRegisterRequest, session: Session = Depends(get_db_session)
+) -> TokenResponse:
+    clean_username = payload.username.strip().lower()
+    if not clean_username:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username cannot be empty.",
+        )
+
+    existing = session.exec(
+        select(User).where(User.username == clean_username)
+    ).first()
+    if existing is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username already taken. Please choose another one.",
+        )
+
+    user = User(
+        username=clean_username,
+        email=payload.email.strip().lower() if payload.email else None,
+        hashed_password=hash_password(payload.password),
+    )
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+
+    token = create_access_token({"sub": str(user.id), "username": user.username})
+    return TokenResponse(
+        access_token=token,
+        token_type="bearer",
+        user=UserResponse(
+            id=user.id,
+            username=user.username,
+            email=user.email,
+            created_at=user.created_at,
+        ),
+    )
+
+
+@app.post("/auth/login", response_model=TokenResponse)
+def login(
+    payload: UserLoginRequest, session: Session = Depends(get_db_session)
+) -> TokenResponse:
+    clean_username = payload.username.strip().lower()
+    user = session.exec(
+        select(User).where(User.username == clean_username)
+    ).first()
+    if user is None or not verify_password(payload.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or password.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    token = create_access_token({"sub": str(user.id), "username": user.username})
+    return TokenResponse(
+        access_token=token,
+        token_type="bearer",
+        user=UserResponse(
+            id=user.id,
+            username=user.username,
+            email=user.email,
+            created_at=user.created_at,
+        ),
+    )
+
+
+@app.get("/auth/me", response_model=UserResponse)
+def get_me(current_user: User = Depends(get_current_user)) -> UserResponse:
+    return UserResponse(
+        id=current_user.id,
+        username=current_user.username,
+        email=current_user.email,
+        created_at=current_user.created_at,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Conversation & Chat Endpoints (Protected by User Auth)
+# ---------------------------------------------------------------------------
+
+
 @app.post("/conversations", response_model=CreateConversationResponse)
 def create_conversation(
     payload: CreateConversationRequest,
+    current_user: User = Depends(get_current_user),
     openrouter_api_key: str | None = Header(default=None, alias="X-OpenRouter-API-Key"),
 ) -> CreateConversationResponse:
     try:
@@ -70,7 +171,9 @@ def create_conversation(
         {"role": "user", "content": payload.prompt},
     ]
     try:
-        completion = client.chat.completions.create(model=payload.model, messages=messages)
+        completion = client.chat.completions.create(
+            model=payload.model, messages=messages
+        )
     except OpenAIError as exc:
         raise HTTPException(
             status_code=502,
@@ -79,7 +182,7 @@ def create_conversation(
     assistant_text = completion.choices[0].message.content or ""
 
     with get_session() as session:
-        conversation = Conversation(title=payload.title)
+        conversation = Conversation(title=payload.title, user_id=current_user.id)
         session.add(conversation)
         session.commit()
         session.refresh(conversation)
@@ -96,13 +199,23 @@ def create_conversation(
         session.commit()
         session.refresh(root_node)
 
+        # Capture all values as plain Python objects while still inside the
+        # session context — accessing ORM attributes after session.close()
+        # raises DetachedInstanceError.
+        conv_id = conversation.id
+        conv_user_id = conversation.user_id
+        conv_title = conversation.title
+        conv_created_at = conversation.created_at
+        root_node_id = root_node.id
+
     return CreateConversationResponse(
         conversation=ConversationSummary(
-            id=conversation.id,
-            title=conversation.title,
-            created_at=conversation.created_at,
+            id=conv_id,
+            user_id=conv_user_id,
+            title=conv_title,
+            created_at=conv_created_at,
         ),
-        root_node_id=root_node.id,
+        root_node_id=root_node_id,
     )
 
 
@@ -110,11 +223,12 @@ def create_conversation(
 def create_node(
     conversation_id: uuid.UUID,
     payload: CreateNodeRequest,
+    current_user: User = Depends(get_current_user),
     openrouter_api_key: str | None = Header(default=None, alias="X-OpenRouter-API-Key"),
 ) -> StreamingResponse:
     with get_session() as session:
         conversation = session.get(Conversation, conversation_id)
-        if conversation is None:
+        if conversation is None or conversation.user_id != current_user.id:
             raise HTTPException(status_code=404, detail="Conversation not found.")
 
         parent = session.get(Node, payload.parent_id)
@@ -175,7 +289,7 @@ def create_node(
         with get_session() as session:
             parent = session.get(Node, payload.parent_id)
             if parent is None:
-                yield "data: {\"type\":\"error\",\"error\":\"Parent node missing during persistence.\"}\n\n"
+                yield 'data: {"type":"error","error":"Parent node missing during persistence."}\n\n'
                 return
 
             node = Node(
@@ -205,22 +319,37 @@ def create_node(
 
 
 @app.get("/conversations", response_model=list[ConversationSummary])
-def list_conversations() -> list[ConversationSummary]:
+def list_conversations(
+    current_user: User = Depends(get_current_user),
+) -> list[ConversationSummary]:
     with get_session() as session:
         conversations = session.exec(
-            select(Conversation).order_by(Conversation.created_at.desc())
+            select(Conversation)
+            .where(Conversation.user_id == current_user.id)
+            .order_by(Conversation.created_at.desc())
         ).all()
         return [
-            ConversationSummary(id=c.id, title=c.title, created_at=c.created_at)
+            ConversationSummary(
+                id=c.id,
+                user_id=c.user_id,
+                title=c.title,
+                created_at=c.created_at,
+            )
             for c in conversations
         ]
 
 
-@app.get("/conversations/{conversation_id}/tree", response_model=list[TreeNodeResponse])
-def get_tree(conversation_id: uuid.UUID) -> list[TreeNodeResponse]:
+@app.get(
+    "/conversations/{conversation_id}/tree",
+    response_model=list[TreeNodeResponse],
+)
+def get_tree(
+    conversation_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+) -> list[TreeNodeResponse]:
     with get_session() as session:
         conversation = session.get(Conversation, conversation_id)
-        if conversation is None:
+        if conversation is None or conversation.user_id != current_user.id:
             raise HTTPException(status_code=404, detail="Conversation not found.")
 
         nodes = session.exec(
@@ -231,14 +360,27 @@ def get_tree(conversation_id: uuid.UUID) -> list[TreeNodeResponse]:
         return [_to_tree_node_response(node) for node in nodes]
 
 
-@app.get("/conversations/{conversation_id}/path/{node_id}", response_model=list[TreeNodeResponse])
-def get_path(conversation_id: uuid.UUID, node_id: uuid.UUID) -> list[TreeNodeResponse]:
+@app.get(
+    "/conversations/{conversation_id}/path/{node_id}",
+    response_model=list[TreeNodeResponse],
+)
+def get_path(
+    conversation_id: uuid.UUID,
+    node_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+) -> list[TreeNodeResponse]:
     with get_session() as session:
+        conversation = session.get(Conversation, conversation_id)
+        if conversation is None or conversation.user_id != current_user.id:
+            raise HTTPException(status_code=404, detail="Conversation not found.")
+
         node = session.get(Node, node_id)
         if node is None:
             raise HTTPException(status_code=404, detail="Node not found.")
         if node.conversation_id != conversation_id:
-            raise HTTPException(status_code=400, detail="Node not in this conversation.")
+            raise HTTPException(
+                status_code=400, detail="Node not in this conversation."
+            )
 
         lineage: list[Node] = []
         current: Node | None = node
@@ -253,17 +395,27 @@ def get_path(conversation_id: uuid.UUID, node_id: uuid.UUID) -> list[TreeNodeRes
 
 
 @app.patch("/nodes/{node_id}/set-main-child", response_model=TreeNodeResponse)
-def set_main_child(node_id: uuid.UUID, payload: SetMainChildRequest) -> TreeNodeResponse:
+def set_main_child(
+    node_id: uuid.UUID,
+    payload: SetMainChildRequest,
+    current_user: User = Depends(get_current_user),
+) -> TreeNodeResponse:
     with get_session() as session:
         parent = session.get(Node, node_id)
         if parent is None:
             raise HTTPException(status_code=404, detail="Parent node not found.")
 
+        conversation = session.get(Conversation, parent.conversation_id)
+        if conversation is None or conversation.user_id != current_user.id:
+            raise HTTPException(status_code=404, detail="Conversation not found.")
+
         child = session.get(Node, payload.child_id)
         if child is None:
             raise HTTPException(status_code=404, detail="Child node not found.")
         if child.parent_id != node_id:
-            raise HTTPException(status_code=400, detail="Provided child is not a child of this parent.")
+            raise HTTPException(
+                status_code=400, detail="Provided child is not a child of this parent."
+            )
 
         parent.main_child_id = child.id
         session.add(parent)

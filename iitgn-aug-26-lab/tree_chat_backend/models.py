@@ -9,11 +9,23 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class User(SQLModel, table=True):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    username: str = Field(index=True, unique=True, nullable=False)
+    email: str | None = Field(default=None, index=True)
+    hashed_password: str = Field(nullable=False)
+    created_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+    conversations: list["Conversation"] = Relationship(back_populates="user")
+
+
 class Conversation(SQLModel, table=True):
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    user_id: uuid.UUID | None = Field(default=None, foreign_key="user.id", index=True)
     title: str
     created_at: datetime = Field(default_factory=utc_now, nullable=False)
 
+    user: Optional[User] = Relationship(back_populates="conversations")
     nodes: list["Node"] = Relationship(back_populates="conversation")
 
 

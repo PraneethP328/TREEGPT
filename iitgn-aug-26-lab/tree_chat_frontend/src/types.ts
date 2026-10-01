@@ -1,5 +1,19 @@
+export type User = {
+  id: string;
+  username: string;
+  email?: string | null;
+  created_at: string;
+};
+
+export type AuthResponse = {
+  access_token: string;
+  token_type: string;
+  user: User;
+};
+
 export type ConversationSummary = {
   id: string;
+  user_id?: string | null;
   title: string;
   created_at: string;
 };
@@ -25,4 +39,3 @@ export type StreamEvent =
   | { type: "token"; token: string }
   | { type: "done"; node: TreeNode }
   | { type: "error"; error: string };
-

@@ -1,20 +1,94 @@
 import type {
+  AuthResponse,
   ConversationSummary,
   CreateConversationResponse,
   StreamEvent,
   TreeNode,
+  User,
 } from "./types";
 
 const BASE_URL = "http://127.0.0.1:8000";
 
-const jsonHeaders = (apiKey: string): HeadersInit => ({
-  "Content-Type": "application/json",
-  "X-OpenRouter-API-Key": apiKey,
-});
+const jsonHeaders = (token: string, apiKey?: string | null): HeadersInit => {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${token}`,
+  };
+  if (apiKey) {
+    headers["X-OpenRouter-API-Key"] = apiKey;
+  }
+  return headers;
+};
 
-export async function listConversations(apiKey: string): Promise<ConversationSummary[]> {
+async function readError(response: Response): Promise<string> {
+  try {
+    const data = (await response.json()) as { detail?: string };
+    return data.detail ?? `Request failed with status ${response.status}`;
+  } catch {
+    return `Request failed with status ${response.status}`;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Auth API
+// ---------------------------------------------------------------------------
+
+export async function registerUser(
+  username: string,
+  password: string,
+  email?: string,
+): Promise<AuthResponse> {
+  const response = await fetch(`${BASE_URL}/auth/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      username,
+      password,
+      email: email?.trim() || undefined,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(await readError(response));
+  }
+  return (await response.json()) as AuthResponse;
+}
+
+export async function loginUser(
+  username: string,
+  password: string,
+): Promise<AuthResponse> {
+  const response = await fetch(`${BASE_URL}/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!response.ok) {
+    throw new Error(await readError(response));
+  }
+  return (await response.json()) as AuthResponse;
+}
+
+export async function getMe(token: string): Promise<User> {
+  const response = await fetch(`${BASE_URL}/auth/me`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+  if (!response.ok) {
+    throw new Error(await readError(response));
+  }
+  return (await response.json()) as User;
+}
+
+// ---------------------------------------------------------------------------
+// Conversations & Tree API (Authenticated)
+// ---------------------------------------------------------------------------
+
+export async function listConversations(
+  token: string,
+): Promise<ConversationSummary[]> {
   const response = await fetch(`${BASE_URL}/conversations`, {
-    headers: jsonHeaders(apiKey),
+    headers: jsonHeaders(token),
   });
   if (!response.ok) {
     throw new Error(await readError(response));
@@ -23,13 +97,14 @@ export async function listConversations(apiKey: string): Promise<ConversationSum
 }
 
 export async function createConversation(
+  token: string,
   apiKey: string,
   prompt: string,
   model: string,
 ): Promise<CreateConversationResponse> {
   const response = await fetch(`${BASE_URL}/conversations`, {
     method: "POST",
-    headers: jsonHeaders(apiKey),
+    headers: jsonHeaders(token, apiKey),
     body: JSON.stringify({
       title: prompt.slice(0, 40) || "New Chat",
       prompt,
@@ -42,10 +117,16 @@ export async function createConversation(
   return (await response.json()) as CreateConversationResponse;
 }
 
-export async function getTree(apiKey: string, conversationId: string): Promise<TreeNode[]> {
-  const response = await fetch(`${BASE_URL}/conversations/${conversationId}/tree`, {
-    headers: jsonHeaders(apiKey),
-  });
+export async function getTree(
+  token: string,
+  conversationId: string,
+): Promise<TreeNode[]> {
+  const response = await fetch(
+    `${BASE_URL}/conversations/${conversationId}/tree`,
+    {
+      headers: jsonHeaders(token),
+    },
+  );
   if (!response.ok) {
     throw new Error(await readError(response));
   }
@@ -53,13 +134,16 @@ export async function getTree(apiKey: string, conversationId: string): Promise<T
 }
 
 export async function getPath(
-  apiKey: string,
+  token: string,
   conversationId: string,
   nodeId: string,
 ): Promise<TreeNode[]> {
-  const response = await fetch(`${BASE_URL}/conversations/${conversationId}/path/${nodeId}`, {
-    headers: jsonHeaders(apiKey),
-  });
+  const response = await fetch(
+    `${BASE_URL}/conversations/${conversationId}/path/${nodeId}`,
+    {
+      headers: jsonHeaders(token),
+    },
+  );
   if (!response.ok) {
     throw new Error(await readError(response));
   }
@@ -67,6 +151,7 @@ export async function getPath(
 }
 
 export async function streamNode(
+  token: string,
   apiKey: string,
   params: {
     conversationId: string;
@@ -77,16 +162,19 @@ export async function streamNode(
   },
   onEvent: (event: StreamEvent) => void,
 ): Promise<void> {
-  const response = await fetch(`${BASE_URL}/conversations/${params.conversationId}/nodes`, {
-    method: "POST",
-    headers: jsonHeaders(apiKey),
-    body: JSON.stringify({
-      parent_id: params.parentId,
-      prompt: params.prompt,
-      include_parent_context: params.includeParentContext ?? true,
-      model: params.model,
-    }),
-  });
+  const response = await fetch(
+    `${BASE_URL}/conversations/${params.conversationId}/nodes`,
+    {
+      method: "POST",
+      headers: jsonHeaders(token, apiKey),
+      body: JSON.stringify({
+        parent_id: params.parentId,
+        prompt: params.prompt,
+        include_parent_context: params.includeParentContext ?? true,
+        model: params.model,
+      }),
+    },
+  );
 
   if (!response.ok) {
     throw new Error(await readError(response));
@@ -123,23 +211,14 @@ export async function streamNode(
   }
 }
 
-async function readError(response: Response): Promise<string> {
-  try {
-    const data = (await response.json()) as { detail?: string };
-    return data.detail ?? `Request failed with status ${response.status}`;
-  } catch {
-    return `Request failed with status ${response.status}`;
-  }
-}
-
 export async function setMainChild(
-  apiKey: string,
+  token: string,
   parentId: string,
   childId: string,
 ): Promise<TreeNode> {
   const response = await fetch(`${BASE_URL}/nodes/${parentId}/set-main-child`, {
     method: "PATCH",
-    headers: jsonHeaders(apiKey),
+    headers: jsonHeaders(token),
     body: JSON.stringify({ child_id: childId }),
   });
   if (!response.ok) {

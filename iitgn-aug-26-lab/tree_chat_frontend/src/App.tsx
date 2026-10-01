@@ -1,14 +1,17 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   createConversation,
+  getMe,
   getPath,
   getTree,
   listConversations,
+  loginUser,
+  registerUser,
   setMainChild,
   streamNode,
 } from "./api";
 import TreeView from "./TreeView";
-import type { ConversationSummary, TreeNode } from "./types";
+import type { ConversationSummary, TreeNode, User } from "./types";
 
 const MODELS = [
   "nvidia/nemotron-3.5-lightning:free",
@@ -41,8 +44,30 @@ type BranchState = {
 };
 
 function App() {
+  // Auth state
+  const [token, setToken] = useState<string | null>(() => localStorage.getItem("tree_chat_jwt"));
+  const [user, setUser] = useState<User | null>(() => {
+    const raw = localStorage.getItem("tree_chat_user");
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw) as User;
+    } catch {
+      return null;
+    }
+  });
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [authUsername, setAuthUsername] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [isAuthSubmitting, setIsAuthSubmitting] = useState(false);
+
+  // OpenRouter API Key state
+  const [apiKey, setApiKey] = useState<string>(() => localStorage.getItem("tree_chat_openrouter_key") || "");
+  const [showApiKeyModal, setShowApiKeyModal] = useState(false);
   const [apiKeyInput, setApiKeyInput] = useState("");
-  const [apiKey, setApiKey] = useState<string | null>(null);
+
+  // Chat and Tree state
   const [model, setModel] = useState(MODELS[0]);
   const [prompt, setPrompt] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -56,12 +81,15 @@ function App() {
   // Branch form: null = no branch form open
   const [branchState, setBranchState] = useState<BranchState | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  // Ref for the LAST user message bubble — we scroll to it once a response finishes
+  // so the question + answer are both visible (question at top, answer below).
+  const lastUserMsgRef = useRef<HTMLDivElement>(null);
 
   // Tree panel
   const [showTree, setShowTree] = useState(false);
   const [allTreeNodes, setAllTreeNodes] = useState<TreeNode[]>([]);
 
-  // IDs of nodes in the currently displayed path (for highlighting in tree)
+  // Active path IDs for highlighting in the tree
   const activePathIds = useMemo(() => new Set(pathNodes.map((n) => n.id)), [pathNodes]);
 
   const messages = useMemo(() => {
@@ -78,32 +106,102 @@ function App() {
     return result;
   }, [pathNodes]);
 
-  // Auto-scroll to bottom
+  // While streaming: follow the incoming tokens by scrolling to the bottom.
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, streamingText]);
-
-  useEffect(() => {
-    if (!apiKey) {
-      return;
+    if (streamingText) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }
-    void refreshConversations(apiKey);
-  }, [apiKey]);
+  }, [streamingText]);
 
-  async function refreshConversations(key: string): Promise<void> {
+  // When a response finishes (messages array updates, streaming is done):
+  // scroll to the last user question so the full Q+A exchange is in view.
+  useEffect(() => {
+    if (messages.length === 0) return;
+    lastUserMsgRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [messages]);
+
+  // Verify and load token on startup
+  useEffect(() => {
+    if (!token) return;
+    getMe(token)
+      .then((verifiedUser) => {
+        setUser(verifiedUser);
+        localStorage.setItem("tree_chat_user", JSON.stringify(verifiedUser));
+        void refreshConversations(token);
+      })
+      .catch(() => {
+        handleLogout("Your session has expired. Please sign in again.");
+      });
+  }, [token]);
+
+  const handleLogout = useCallback((customError?: string) => {
+    localStorage.removeItem("tree_chat_jwt");
+    localStorage.removeItem("tree_chat_user");
+    setToken(null);
+    setUser(null);
+    setConversations([]);
+    setConversationId(null);
+    setPathNodes([]);
+    setAllTreeNodes([]);
+    setPrompt("");
+    setStreamingText("");
+    setBranchState(null);
+    if (customError) {
+      setAuthError(customError);
+    }
+  }, []);
+
+  async function refreshConversations(authToken: string): Promise<void> {
     try {
-      const items = await listConversations(key);
+      const items = await listConversations(authToken);
       setConversations(items);
       setError(null);
     } catch (err) {
-      setError(getErrorMessage(err));
+      const msg = getErrorMessage(err);
+      if (msg.includes("401") || msg.toLowerCase().includes("credentials")) {
+        handleLogout("Session expired. Please sign in again.");
+      } else {
+        setError(msg);
+      }
+    }
+  }
+
+  async function handleAuthSubmit(e: FormEvent) {
+    e.preventDefault();
+    setAuthError(null);
+    if (!authUsername.trim() || !authPassword.trim()) {
+      setAuthError("Username and password are required.");
+      return;
+    }
+
+    setIsAuthSubmitting(true);
+    try {
+      let resp;
+      if (authMode === "register") {
+        resp = await registerUser(authUsername, authPassword, authEmail);
+      } else {
+        resp = await loginUser(authUsername, authPassword);
+      }
+
+      setToken(resp.access_token);
+      setUser(resp.user);
+      localStorage.setItem("tree_chat_jwt", resp.access_token);
+      localStorage.setItem("tree_chat_user", JSON.stringify(resp.user));
+      setAuthUsername("");
+      setAuthPassword("");
+      setAuthEmail("");
+      await refreshConversations(resp.access_token);
+    } catch (err) {
+      setAuthError(getErrorMessage(err));
+    } finally {
+      setIsAuthSubmitting(false);
     }
   }
 
   async function openConversation(id: string): Promise<void> {
-    if (!apiKey) return;
+    if (!token) return;
     try {
-      const nodes = await getTree(apiKey, id);
+      const nodes = await getTree(token, id);
       const path = deriveMainPath(nodes);
       setConversationId(id);
       setPathNodes(path);
@@ -115,11 +213,10 @@ function App() {
     }
   }
 
-  /** Open the tree panel and (re-)fetch the latest node list. */
   async function openTree(): Promise<void> {
-    if (!apiKey || !conversationId) return;
+    if (!token || !conversationId) return;
     try {
-      const nodes = await getTree(apiKey, conversationId);
+      const nodes = await getTree(token, conversationId);
       setAllTreeNodes(nodes);
       setShowTree(true);
     } catch (err) {
@@ -127,16 +224,11 @@ function App() {
     }
   }
 
-  /**
-   * Called when the user clicks a node in the tree.
-   * leafId is already the effective leaf (main-child chain resolved in TreeView).
-   * Load the full root→leaf path into the chat view.
-   */
   const handleSelectLeaf = useCallback(
     async (leafId: string): Promise<void> => {
-      if (!apiKey || !conversationId) return;
+      if (!token || !conversationId) return;
       try {
-        const path = await getPath(apiKey, conversationId, leafId);
+        const path = await getPath(token, conversationId, leafId);
         setPathNodes(path);
         setBranchState(null);
         setShowTree(false);
@@ -145,35 +237,28 @@ function App() {
         setError(getErrorMessage(err));
       }
     },
-    [apiKey, conversationId],
+    [token, conversationId],
   );
 
-  /** Set a node as the main child of its parent, then refresh the tree. */
   const handleSetMainChild = useCallback(
     async (parentId: string, childId: string): Promise<void> => {
-      if (!apiKey || !conversationId) return;
+      if (!token || !conversationId) return;
       try {
-        await setMainChild(apiKey, parentId, childId);
-        // Refresh tree nodes to reflect the updated main_child_id
-        const nodes = await getTree(apiKey, conversationId);
+        await setMainChild(token, parentId, childId);
+        const nodes = await getTree(token, conversationId);
         setAllTreeNodes(nodes);
       } catch (err) {
         setError(getErrorMessage(err));
       }
     },
-    [apiKey, conversationId],
+    [token, conversationId],
   );
 
-  /**
-   * "Chat from here" — navigates to exactly nodeId (not the main-child leaf).
-   * The chat view shows root→nodeId. The composer will then create a child of nodeId.
-   * This is how the user continues a branch from a mid-tree node.
-   */
   const handleChatFromNode = useCallback(
     async (nodeId: string): Promise<void> => {
-      if (!apiKey || !conversationId) return;
+      if (!token || !conversationId) return;
       try {
-        const path = await getPath(apiKey, conversationId, nodeId);
+        const path = await getPath(token, conversationId, nodeId);
         setPathNodes(path);
         setBranchState(null);
         setShowTree(false);
@@ -182,15 +267,19 @@ function App() {
         setError(getErrorMessage(err));
       }
     },
-    [apiKey, conversationId],
+    [token, conversationId],
   );
 
   async function handleSend(event: FormEvent): Promise<void> {
     event.preventDefault();
+    if (!token) return;
+
     if (!apiKey) {
-      setError("Enter your OpenRouter API key first.");
+      setShowApiKeyModal(true);
+      setError("Please set your OpenRouter API key to chat with AI models.");
       return;
     }
+
     const text = prompt.trim();
     if (!text || isLoading) {
       return;
@@ -203,10 +292,10 @@ function App() {
 
     try {
       if (!conversationId || pathNodes.length === 0) {
-        const created = await createConversation(apiKey, text, model);
+        const created = await createConversation(token, apiKey, text, model);
         setConversationId(created.conversation.id);
-        await refreshConversations(apiKey);
-        const path = await getPath(apiKey, created.conversation.id, created.root_node_id);
+        await refreshConversations(token);
+        const path = await getPath(token, created.conversation.id, created.root_node_id);
         setPathNodes(path);
         return;
       }
@@ -215,6 +304,7 @@ function App() {
       let doneNode: TreeNode | null = null;
 
       await streamNode(
+        token,
         apiKey,
         {
           conversationId,
@@ -238,16 +328,12 @@ function App() {
       }
       setStreamingText("");
 
-      // Reload the full path from DB so every node has fresh main_child_id.
-      // The `done` event gives us the new node but the parent's main_child_id
-      // is updated on the server AFTER that — so we must re-fetch.
-      const freshPath = await getPath(apiKey, conversationId!, (doneNode as TreeNode).id);
+      const freshPath = await getPath(token, conversationId, (doneNode as TreeNode).id);
       setPathNodes(freshPath);
 
-      await refreshConversations(apiKey);
-      const updatedTree = await getTree(apiKey, conversationId!);
+      await refreshConversations(token);
+      const updatedTree = await getTree(token, conversationId);
       setAllTreeNodes(updatedTree);
-
     } catch (err) {
       setStreamingText("");
       setError(getErrorMessage(err));
@@ -265,10 +351,16 @@ function App() {
     setBranchState(null);
   }
 
-  /** Called when the user submits the inline branch form. */
   async function handleBranchSubmit(event: FormEvent): Promise<void> {
     event.preventDefault();
-    if (!apiKey || !conversationId || !branchState) return;
+    if (!token || !conversationId || !branchState) return;
+
+    if (!apiKey) {
+      setShowApiKeyModal(true);
+      setError("Please set your OpenRouter API key.");
+      return;
+    }
+
     const text = branchState.prompt.trim();
     if (!text || isLoading) return;
 
@@ -280,6 +372,7 @@ function App() {
       let doneNode: TreeNode | null = null;
 
       await streamNode(
+        token,
         apiKey,
         {
           conversationId,
@@ -296,14 +389,13 @@ function App() {
       );
 
       if (!doneNode) throw new Error("Stream ended without a final node.");
-      const newPath = await getPath(apiKey, conversationId, (doneNode as TreeNode).id);
+      const newPath = await getPath(token, conversationId, (doneNode as TreeNode).id);
       setPathNodes(newPath);
       setStreamingText("");
       setBranchState(null);
-      await refreshConversations(apiKey);
-      const updatedTree = await getTree(apiKey, conversationId);
+      await refreshConversations(token);
+      const updatedTree = await getTree(token, conversationId);
       setAllTreeNodes(updatedTree);
-
     } catch (err) {
       setStreamingText("");
       setError(getErrorMessage(err));
@@ -316,37 +408,101 @@ function App() {
     setBranchState({ nodeId, prompt: "", inheritContext: true, model });
   }
 
-  function handleSetApiKey(event: FormEvent): void {
+  function handleSaveApiKey(event: FormEvent): void {
     event.preventDefault();
-    const trimmed = apiKeyInput.trim();
-    if (!trimmed) {
-      setError("Please enter a valid OpenRouter API key.");
-      return;
-    }
-    setApiKey(trimmed);
+    const cleanKey = apiKeyInput.trim();
+    setApiKey(cleanKey);
+    localStorage.setItem("tree_chat_openrouter_key", cleanKey);
+    setShowApiKeyModal(false);
     setApiKeyInput("");
     setError(null);
   }
 
-  if (!apiKey) {
+  // ── 1. If not authenticated, render Login / Register view ───────────────────
+  if (!token || !user) {
     return (
-      <div className="key-gate">
-        <form className="key-card" onSubmit={handleSetApiKey}>
-          <h1>Tree Chat Prototype</h1>
-          <p>Enter your OpenRouter API key to start.</p>
-          <input
-            type="password"
-            placeholder="sk-or-v1-..."
-            value={apiKeyInput}
-            onChange={(e) => setApiKeyInput(e.target.value)}
-          />
-          <button type="submit">Continue</button>
-          {error ? <div className="error">{error}</div> : null}
-        </form>
+      <div className="auth-container">
+        <div className="auth-card">
+          <div className="auth-header">
+            <h1>Tree Chat</h1>
+            <p>Branching Conversations with Isolated User Chats</p>
+          </div>
+
+          <div className="auth-tabs">
+            <button
+              className={`auth-tab ${authMode === "login" ? "active" : ""}`}
+              onClick={() => {
+                setAuthMode("login");
+                setAuthError(null);
+              }}
+              type="button"
+            >
+              Sign In
+            </button>
+            <button
+              className={`auth-tab ${authMode === "register" ? "active" : ""}`}
+              onClick={() => {
+                setAuthMode("register");
+                setAuthError(null);
+              }}
+              type="button"
+            >
+              Create Account
+            </button>
+          </div>
+
+          <form className="auth-form" onSubmit={(e) => void handleAuthSubmit(e)}>
+            <div className="form-field">
+              <label>Username</label>
+              <input
+                type="text"
+                placeholder="e.g. alice or user1"
+                value={authUsername}
+                onChange={(e) => setAuthUsername(e.target.value)}
+                autoFocus
+                required
+              />
+            </div>
+
+            {authMode === "register" && (
+              <div className="form-field">
+                <label>Email (Optional)</label>
+                <input
+                  type="email"
+                  placeholder="name@example.com"
+                  value={authEmail}
+                  onChange={(e) => setAuthEmail(e.target.value)}
+                />
+              </div>
+            )}
+
+            <div className="form-field">
+              <label>Password</label>
+              <input
+                type="password"
+                placeholder="••••••••"
+                value={authPassword}
+                onChange={(e) => setAuthPassword(e.target.value)}
+                required
+              />
+            </div>
+
+            {authError && <div className="error">{authError}</div>}
+
+            <button type="submit" className="auth-submit-btn" disabled={isAuthSubmitting}>
+              {isAuthSubmitting
+                ? "Authenticating…"
+                : authMode === "login"
+                ? "Sign In to Your Workspace"
+                : "Create Account & Sign In"}
+            </button>
+          </form>
+        </div>
       </div>
     );
   }
 
+  // ── 2. Authenticated Workspace ──────────────────────────────────────────────
   return (
     <>
       <div className="layout">
@@ -354,16 +510,46 @@ function App() {
           <div className="sidebar-header">
             <button onClick={startNewChat}>+ New Chat</button>
           </div>
+
           <div className="conversation-list">
-            {conversations.map((conversation) => (
+            {conversations.length === 0 ? (
+              <div style={{ color: "#64748b", fontSize: "13px", padding: "8px" }}>
+                No chats yet. Start a new conversation!
+              </div>
+            ) : (
+              conversations.map((conversation) => (
+                <button
+                  key={conversation.id}
+                  className={conversation.id === conversationId ? "conversation active" : "conversation"}
+                  onClick={() => void openConversation(conversation.id)}
+                >
+                  {conversation.title}
+                </button>
+              ))
+            )}
+          </div>
+
+          {/* User profile & isolated session footer */}
+          <div className="sidebar-user-panel">
+            <div className="user-badge-row">
+              <div className="user-identity">
+                <div className="user-avatar">
+                  {user.username.charAt(0).toUpperCase()}
+                </div>
+                <div className="user-meta">
+                  <span className="user-name">@{user.username}</span>
+                  <span className="user-scope">● Private Workspace</span>
+                </div>
+              </div>
               <button
-                key={conversation.id}
-                className={conversation.id === conversationId ? "conversation active" : "conversation"}
-                onClick={() => void openConversation(conversation.id)}
+                type="button"
+                className="btn-signout"
+                title="Sign out of account"
+                onClick={() => handleLogout()}
               >
-                {conversation.title}
+                Sign Out
               </button>
-            ))}
+            </div>
           </div>
         </aside>
 
@@ -378,6 +564,19 @@ function App() {
                   </option>
                 ))}
               </select>
+
+              <button
+                type="button"
+                className="api-key-btn"
+                title={apiKey ? "Update OpenRouter API Key" : "Set OpenRouter API Key"}
+                onClick={() => {
+                  setApiKeyInput(apiKey);
+                  setShowApiKeyModal(true);
+                }}
+              >
+                {apiKey ? "🔑 Key Active" : "⚠️ Set API Key"}
+              </button>
+
               {conversationId && (
                 <button
                   className="tree-open-btn"
@@ -392,22 +591,31 @@ function App() {
 
           <section className="messages">
             {messages.length === 0 ? (
-              <div className="empty-state">Ask anything to begin.</div>
+              <div className="empty-state">Ask anything to begin. Every branch you create is private to @{user.username}.</div>
             ) : (
               messages.map((message, index) => {
                 const showBranchFormHere =
                   message.role === "assistant" &&
                   branchState?.nodeId === message.nodeId;
 
+                // Identify the very last user message so we can attach the scroll ref.
+                // Messages alternate user/assistant, so the last user msg is at
+                // index messages.length - 2 (second-to-last overall).
+                const isLastUserMsg =
+                  message.role === "user" && index === messages.length - 2;
+
                 return (
-                  <div key={`${message.nodeId}-${message.role}-${index}`}>
+                  <div
+                    key={`${message.nodeId}-${message.role}-${index}`}
+                    ref={isLastUserMsg ? lastUserMsgRef : undefined}
+                  >
                     <div className={`bubble ${message.role}`}>
                       <div className="role">{message.role === "user" ? "You" : "Assistant"}</div>
                       <div>{message.content}</div>
                       {message.role === "assistant" && message.model ? (
                         <div className="model-tag">{message.model}</div>
                       ) : null}
-                      {/* Branch button — only on assistant bubbles, only when a conversation is open */}
+                      {/* Branch button — only on assistant bubbles */}
                       {message.role === "assistant" && conversationId && !isLoading ? (
                         <div className="bubble-actions">
                           {!showBranchFormHere ? (
@@ -430,7 +638,6 @@ function App() {
                       ) : null}
                     </div>
 
-                    {/* Inline branch form anchored to this bubble */}
                     {showBranchFormHere && (
                       <BranchForm
                         state={branchState!}
@@ -473,7 +680,39 @@ function App() {
         </main>
       </div>
 
-      {/* Tree — position:fixed, full-screen, renders above everything */}
+      {/* OpenRouter API Key Modal */}
+      {showApiKeyModal && (
+        <div className="key-modal-overlay">
+          <form className="key-card" onSubmit={handleSaveApiKey}>
+            <div className="auth-header">
+              <h1>OpenRouter API Key</h1>
+              <p>Enter your key from openrouter.ai/settings/keys</p>
+            </div>
+            <input
+              type="password"
+              placeholder="sk-or-v1-..."
+              value={apiKeyInput}
+              onChange={(e) => setApiKeyInput(e.target.value)}
+              autoFocus
+            />
+            <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end", marginTop: "8px" }}>
+              <button
+                type="button"
+                className="btn-ghost"
+                onClick={() => setShowApiKeyModal(false)}
+                style={{ background: "transparent", border: "1px solid #374151", color: "#9ca3af", borderRadius: "8px", padding: "10px 14px", cursor: "pointer" }}
+              >
+                Close
+              </button>
+              <button type="submit" style={{ background: "#2563eb", border: 0, color: "white", borderRadius: "8px", padding: "10px 14px", cursor: "pointer" }}>
+                Save Key
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Tree Visualization */}
       {showTree && conversationId && (
         <TreeView
           treeNodes={allTreeNodes}

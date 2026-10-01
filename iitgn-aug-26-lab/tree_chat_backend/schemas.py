@@ -8,6 +8,30 @@ from pydantic import BaseModel, Field
 from tree_chat_backend.openrouter import DEFAULT_MODEL
 
 
+class UserRegisterRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=50)
+    password: str = Field(min_length=6)
+    email: str | None = None
+
+
+class UserLoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class UserResponse(BaseModel):
+    id: uuid.UUID
+    username: str
+    email: str | None = None
+    created_at: datetime
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserResponse
+
+
 class CreateConversationRequest(BaseModel):
     title: str = Field(default="New Chat")
     prompt: str
@@ -16,6 +40,7 @@ class CreateConversationRequest(BaseModel):
 
 class ConversationSummary(BaseModel):
     id: uuid.UUID
+    user_id: uuid.UUID | None = None
     title: str
     created_at: datetime
 
