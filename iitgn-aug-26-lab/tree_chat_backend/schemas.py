@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -50,11 +51,22 @@ class CreateConversationResponse(BaseModel):
     root_node_id: uuid.UUID
 
 
+ContextMode = Literal["full", "none", "selected"]
+
+
 class CreateNodeRequest(BaseModel):
     parent_id: uuid.UUID
     prompt: str
+    # Deprecated: use context_mode. False is treated as context_mode="none".
     include_parent_context: bool = True
+    context_mode: ContextMode | None = None
+    context_node_ids: list[uuid.UUID] = Field(default_factory=list)
     model: str = Field(default=DEFAULT_MODEL)
+
+    def resolved_mode(self) -> str:
+        if self.context_mode is not None:
+            return self.context_mode
+        return "full" if self.include_parent_context else "none"
 
 
 class TreeNodeResponse(BaseModel):
@@ -64,9 +76,19 @@ class TreeNodeResponse(BaseModel):
     prompt: str
     response: str
     include_parent_context: bool
+    context_mode: str = "full"
+    context_node_ids: list[uuid.UUID] = Field(default_factory=list)
+    context_tokens: int | None = None
+    context_summarized: bool = False
     main_child_id: uuid.UUID | None
     model_used: str
     created_at: datetime
+
+
+class ConfigResponse(BaseModel):
+    warn_tokens: int
+    summarize_tokens: int
+    keep_recent_turns: int
 
 
 class SetMainChildRequest(BaseModel):

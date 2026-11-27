@@ -26,6 +26,25 @@ def init_db() -> None:
             conn.exec_driver_sql("ALTER TABLE conversation ADD COLUMN user_id VARCHAR(36) REFERENCES user(id)")
             conn.commit()
 
+        cursor = conn.exec_driver_sql("PRAGMA table_info(node)")
+        node_columns = {row[1] for row in cursor.fetchall()}
+        new_columns = {
+            "context_mode": "VARCHAR NOT NULL DEFAULT 'full'",
+            "context_node_ids": "VARCHAR",
+            "context_summary": "VARCHAR",
+            "context_tokens": "INTEGER",
+            "context_summarized": "BOOLEAN NOT NULL DEFAULT 0",
+        }
+        for name, ddl in new_columns.items():
+            if name not in node_columns:
+                conn.exec_driver_sql(f"ALTER TABLE node ADD COLUMN {name} {ddl}")
+        # Old rows created with include_parent_context = false mean "none".
+        if "context_mode" not in node_columns:
+            conn.exec_driver_sql(
+                "UPDATE node SET context_mode = 'none' WHERE include_parent_context = 0"
+            )
+        conn.commit()
+
 
 def get_session() -> Session:
     return Session(engine)

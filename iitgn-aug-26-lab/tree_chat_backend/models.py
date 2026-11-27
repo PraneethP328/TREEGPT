@@ -36,6 +36,16 @@ class Node(SQLModel, table=True):
     prompt: str
     response: str
     include_parent_context: bool = Field(default=True, nullable=False)
+    # "full" | "none" | "selected" — how this node's prompt was given context.
+    context_mode: str = Field(default="full", nullable=False)
+    # JSON list of node ids used as context when context_mode == "selected".
+    context_node_ids: str | None = Field(default=None)
+    # Cached summary of this node's effective context up to and including it.
+    context_summary: str | None = Field(default=None)
+    # Estimated input tokens actually sent for this node.
+    context_tokens: int | None = Field(default=None)
+    # True if older turns were replaced by a summary (or trimmed) for this node.
+    context_summarized: bool = Field(default=False, nullable=False)
     main_child_id: uuid.UUID | None = Field(default=None, foreign_key="node.id", index=True)
     model_used: str
     created_at: datetime = Field(default_factory=utc_now, nullable=False)

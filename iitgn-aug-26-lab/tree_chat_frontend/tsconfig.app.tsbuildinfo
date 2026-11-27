@@ -1,1 +1,1 @@
-{"root":["./src/app.tsx","./src/treeview.tsx","./src/api.ts","./src/main.tsx","./src/types.ts"],"version":"5.9.3"}
+{"root":["./src/app.tsx","./src/icons.tsx","./src/markdown.tsx","./src/treeview.tsx","./src/api.ts","./src/contextview.ts","./src/main.tsx","./src/treelayout.ts","./src/treemodel.ts","./src/treesearch.ts","./src/types.ts","./src/ui/contextpicker.tsx","./src/ui/dropdown.tsx","./src/ui/notice.tsx"],"version":"5.9.3"}

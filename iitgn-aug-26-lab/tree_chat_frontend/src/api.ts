@@ -1,5 +1,8 @@
 import type {
+  ApiNode,
+  AppConfig,
   AuthResponse,
+  ContextMode,
   ConversationSummary,
   CreateConversationResponse,
   StreamEvent,
@@ -8,6 +11,39 @@ import type {
 } from "./types";
 
 const BASE_URL = "http://127.0.0.1:8000";
+
+/** Backend timestamps are UTC; SQLite drops the zone, so add it back before parsing. */
+function parseTime(value: string): number {
+  const hasZone = /[zZ]|[+-]\d\d:?\d\d$/.test(value);
+  const ms = Date.parse(hasZone ? value : `${value}Z`);
+  return Number.isNaN(ms) ? 0 : ms;
+}
+
+export function toTreeNode(n: ApiNode): TreeNode {
+  const mode: ContextMode = n.context_mode ?? (n.include_parent_context ? "full" : "none");
+  return {
+    id: n.id,
+    conversationId: n.conversation_id,
+    parentId: n.parent_id,
+    prompt: n.prompt,
+    response: n.response,
+    contextMode: mode,
+    contextNodeIds: n.context_node_ids ?? [],
+    contextTokens: n.context_tokens ?? null,
+    contextSummarized: !!n.context_summarized,
+    mainChildId: n.main_child_id,
+    modelUsed: n.model_used,
+    createdAt: parseTime(n.created_at),
+  };
+}
+
+export async function getConfig(): Promise<AppConfig> {
+  const response = await fetch(`${BASE_URL}/config`);
+  if (!response.ok) {
+    throw new Error(await readError(response));
+  }
+  return (await response.json()) as AppConfig;
+}
 
 const jsonHeaders = (token: string, apiKey?: string | null): HeadersInit => {
   const headers: Record<string, string> = {
@@ -22,11 +58,39 @@ const jsonHeaders = (token: string, apiKey?: string | null): HeadersInit => {
 
 async function readError(response: Response): Promise<string> {
   try {
-    const data = (await response.json()) as { detail?: string };
-    return data.detail ?? `Request failed with status ${response.status}`;
+    const data = (await response.json()) as { detail?: unknown };
+    return formatErrorDetail(data.detail) ?? `Request failed with status ${response.status}`;
   } catch {
     return `Request failed with status ${response.status}`;
   }
+}
+
+function formatErrorDetail(detail: unknown): string | null {
+  if (typeof detail === "string" && detail.trim()) {
+    return detail;
+  }
+
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) => {
+        if (typeof item === "string") {
+          return item;
+        }
+        if (item && typeof item === "object" && "msg" in item) {
+          const message = (item as { msg?: unknown }).msg;
+          return typeof message === "string" ? message : JSON.stringify(item);
+        }
+        return JSON.stringify(item);
+      })
+      .filter(Boolean);
+    return messages.length > 0 ? messages.join("; ") : null;
+  }
+
+  if (detail && typeof detail === "object") {
+    return JSON.stringify(detail);
+  }
+
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -130,7 +194,7 @@ export async function getTree(
   if (!response.ok) {
     throw new Error(await readError(response));
   }
-  return (await response.json()) as TreeNode[];
+  return ((await response.json()) as ApiNode[]).map(toTreeNode);
 }
 
 export async function getPath(
@@ -147,7 +211,7 @@ export async function getPath(
   if (!response.ok) {
     throw new Error(await readError(response));
   }
-  return (await response.json()) as TreeNode[];
+  return ((await response.json()) as ApiNode[]).map(toTreeNode);
 }
 
 export async function streamNode(
@@ -158,7 +222,9 @@ export async function streamNode(
     parentId: string;
     prompt: string;
     model: string;
-    includeParentContext?: boolean;
+    contextMode: ContextMode;
+    /** Used when contextMode is "selected". */
+    contextNodeIds?: string[];
   },
   onEvent: (event: StreamEvent) => void,
 ): Promise<void> {
@@ -170,7 +236,9 @@ export async function streamNode(
       body: JSON.stringify({
         parent_id: params.parentId,
         prompt: params.prompt,
-        include_parent_context: params.includeParentContext ?? true,
+        include_parent_context: params.contextMode !== "none",
+        context_mode: params.contextMode,
+        context_node_ids: params.contextMode === "selected" ? params.contextNodeIds ?? [] : [],
         model: params.model,
       }),
     },
@@ -224,5 +292,5 @@ export async function setMainChild(
   if (!response.ok) {
     throw new Error(await readError(response));
   }
-  return (await response.json()) as TreeNode;
+  return toTreeNode((await response.json()) as ApiNode);
 }

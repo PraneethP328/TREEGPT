@@ -16,11 +16,20 @@ from tree_chat_backend.auth import (
     hash_password,
     verify_password,
 )
-from tree_chat_backend.context import build_context, context_to_messages
+from tree_chat_backend.context import (
+    context_to_messages,
+    context_tokens,
+    dump_node_ids,
+    effective_context,
+    order_selected,
+    parse_node_ids,
+)
+from tree_chat_backend import summarize
 from tree_chat_backend.db import get_db_session, get_session, init_db
 from tree_chat_backend.models import Conversation, Node, User
 from tree_chat_backend.openrouter import get_openrouter_client
 from tree_chat_backend.schemas import (
+    ConfigResponse,
     ConversationSummary,
     CreateConversationRequest,
     CreateConversationResponse,
@@ -59,9 +68,41 @@ def _to_tree_node_response(node: Node) -> TreeNodeResponse:
         prompt=node.prompt,
         response=node.response,
         include_parent_context=node.include_parent_context,
+        context_mode=node.context_mode or "full",
+        context_node_ids=parse_node_ids(node.context_node_ids),
+        context_tokens=node.context_tokens,
+        context_summarized=bool(node.context_summarized),
         main_child_id=node.main_child_id,
         model_used=node.model_used,
         created_at=node.created_at,
+    )
+
+
+def _node_loader(session: Session, conversation_id: uuid.UUID):
+    def load(ids: list[uuid.UUID]) -> list[Node]:
+        if not ids:
+            return []
+        return list(
+            session.exec(
+                select(Node).where(
+                    Node.id.in_(ids), Node.conversation_id == conversation_id
+                )
+            ).all()
+        )
+
+    return load
+
+
+def _sse(payload: dict) -> str:
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+@app.get("/config", response_model=ConfigResponse)
+def get_config() -> ConfigResponse:
+    return ConfigResponse(
+        warn_tokens=summarize.WARN_TOKENS,
+        summarize_tokens=summarize.SUMMARIZE_TOKENS,
+        keep_recent_turns=summarize.KEEP_RECENT_TURNS,
     )
 
 
@@ -193,6 +234,8 @@ def create_conversation(
             prompt=payload.prompt,
             response=assistant_text,
             include_parent_context=True,
+            context_mode="full",
+            context_tokens=context_tokens([], payload.prompt),
             model_used=payload.model,
         )
         session.add(root_node)
@@ -249,47 +292,119 @@ def create_node(
                 detail=f"Node already has {MAX_CHILDREN_PER_NODE} children. Choose another branch point.",
             )
 
-        if payload.include_parent_context:
-            context_nodes = build_context(parent)
-            messages = context_to_messages(context_nodes, SYSTEM_PROMPT)
-        else:
-            messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-        messages.append({"role": "user", "content": payload.prompt})
+        mode = payload.resolved_mode()
+        selected_ids: list[uuid.UUID] = []
+        if mode == "selected":
+            selected_ids = list(dict.fromkeys(payload.context_node_ids))
+            if not selected_ids:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Select at least one message to use as context.",
+                )
+            found = _node_loader(session, conversation_id)(selected_ids)
+            if len(found) != len(selected_ids):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Some selected context messages are not in this conversation.",
+                )
 
     try:
         client = get_openrouter_client(openrouter_api_key)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    try:
-        stream = client.chat.completions.create(
-            model=payload.model,
-            messages=messages,
-            stream=True,
-        )
-    except OpenAIError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"OpenRouter streaming call failed for model '{payload.model}': {exc}",
-        ) from exc
-
     def event_stream() -> Iterator[str]:
+        # 1. Work out exactly which turns the model will see.
+        with get_session() as session:
+            load = _node_loader(session, conversation_id)
+            parent = session.get(Node, payload.parent_id)
+            if parent is None:
+                yield _sse({"type": "error", "error": "Parent node not found."})
+                return
+            if mode == "full":
+                chain = effective_context(parent, load)
+            elif mode == "selected":
+                chain = order_selected(load(selected_ids))
+            else:
+                chain = []
+
+            chain_ids = [n.id for n in chain]
+            raw_tokens = context_tokens(chain, payload.prompt)
+            will_summarize = (
+                raw_tokens > summarize.SUMMARIZE_TOKENS
+                and len(chain) > summarize.KEEP_RECENT_TURNS
+            )
+            yield _sse(
+                {
+                    "type": "context",
+                    "mode": mode,
+                    "messages": len(chain),
+                    "tokens": raw_tokens,
+                    "warn": raw_tokens > summarize.WARN_TOKENS,
+                    "summarizing": will_summarize,
+                }
+            )
+
+            # 2. Condense older turns if the branch got too long.
+            def prefix_is_cacheable(i: int) -> bool:
+                seen = [n.id for n in effective_context(chain[i], load)]
+                return seen == chain_ids[: i + 1]
+
+            def save_summary(node: Node, text: str) -> None:
+                node.context_summary = text
+                session.add(node)
+                session.commit()
+
+            compacted = summarize.compact_context(
+                chain,
+                payload.prompt,
+                client,
+                payload.model,
+                prefix_is_cacheable,
+                save_summary,
+            )
+            if compacted.summarized or compacted.trimmed:
+                yield _sse(
+                    {
+                        "type": "summarized",
+                        "trimmed": compacted.trimmed,
+                        "from_tokens": compacted.from_tokens,
+                        "to_tokens": compacted.to_tokens,
+                    }
+                )
+            messages = context_to_messages(
+                compacted.recent, SYSTEM_PROMPT, compacted.summary
+            )
+            messages.append({"role": "user", "content": payload.prompt})
+
+        # 3. Stream the answer.
         chunks: list[str] = []
         try:
+            stream = client.chat.completions.create(
+                model=payload.model,
+                messages=messages,
+                stream=True,
+            )
             for chunk in stream:
                 delta = chunk.choices[0].delta.content if chunk.choices else None
                 if delta:
                     chunks.append(delta)
-                    yield f"data: {json.dumps({'type': 'token', 'token': delta})}\n\n"
+                    yield _sse({"type": "token", "token": delta})
         except OpenAIError as exc:
-            yield f"data: {json.dumps({'type': 'error', 'error': f'Stream interrupted: {exc}'})}\n\n"
+            yield _sse(
+                {
+                    "type": "error",
+                    "error": f"OpenRouter call failed for model '{payload.model}': {exc}",
+                }
+            )
             return
 
+        # 4. Persist.
         final_response = "".join(chunks)
         with get_session() as session:
             parent = session.get(Node, payload.parent_id)
             if parent is None:
-                yield 'data: {"type":"error","error":"Parent node missing during persistence."}\n\n'
+                yield _sse({"type": "error", "error": "Parent node missing during persistence."})
                 return
 
             node = Node(
@@ -297,7 +412,11 @@ def create_node(
                 parent_id=payload.parent_id,
                 prompt=payload.prompt,
                 response=final_response,
-                include_parent_context=payload.include_parent_context,
+                include_parent_context=mode != "none",
+                context_mode=mode,
+                context_node_ids=dump_node_ids(selected_ids),
+                context_tokens=compacted.to_tokens,
+                context_summarized=compacted.summarized or compacted.trimmed,
                 model_used=payload.model,
             )
             session.add(node)
@@ -309,11 +428,12 @@ def create_node(
                 session.add(parent)
                 session.commit()
 
-            done_payload = {
-                "type": "done",
-                "node": _to_tree_node_response(node).model_dump(mode="json"),
-            }
-            yield f"data: {json.dumps(done_payload)}\n\n"
+            yield _sse(
+                {
+                    "type": "done",
+                    "node": _to_tree_node_response(node).model_dump(mode="json"),
+                }
+            )
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
